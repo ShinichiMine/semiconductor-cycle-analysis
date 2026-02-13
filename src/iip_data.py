@@ -7,6 +7,7 @@
 https://www.meti.go.jp/statistics/tyo/iip/
 """
 
+import os
 import pandas as pd
 import requests
 from io import BytesIO
@@ -20,6 +21,117 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 
 # e-Stat API用の設定
 ESTAT_BASE_URL = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
+
+# IIPデータCSV保存先
+IIP_CSV_PATH = DATA_DIR / "iip_electronic_parts.csv"
+
+# e-Stat 鉱工業指数 statsDataId
+# 鉱工業指数（平成27年基準）電子部品・デバイス工業 出荷・在庫
+ESTAT_STATS_DATA_ID = "0003119453"
+
+
+def fetch_iip_from_estat(app_id: str | None = None) -> pd.DataFrame | None:
+    """e-Stat APIから電子部品・デバイス工業のIIPデータを取得し、CSVに保存する。
+
+    環境変数 ESTAT_APP_ID、または引数 app_id でアプリケーションIDを指定する。
+    取得成功時は data/iip_electronic_parts.csv に保存し、DataFrameを返す。
+    取得失敗（appId未設定・API エラー・解析エラー）時は None を返す。
+
+    Returns:
+        DataFrame (columns: shipment_index, inventory_index, index=date) or None
+    """
+    app_id = app_id or os.environ.get("ESTAT_APP_ID")
+    if not app_id:
+        return None
+
+    params = {
+        "appId": app_id,
+        "lang": "J",
+        "statsDataId": ESTAT_STATS_DATA_ID,
+        "cdArea": "00000",
+        "metaGetFlg": "N",
+        "cntGetFlg": "N",
+        "explanationGetFlg": "N",
+        "annotationGetFlg": "N",
+        "sectionHeaderFlg": "1",
+    }
+
+    try:
+        resp = requests.get(ESTAT_BASE_URL, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return None
+
+    # API レスポンス検証
+    result = data.get("GET_STATS_DATA", {}).get("RESULT", {})
+    if result.get("STATUS") != 0:
+        return None
+
+    stat_data = data.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {})
+    value_list = stat_data.get("DATA_INF", {}).get("VALUE", [])
+    if not value_list:
+        return None
+
+    # 出荷指数（$指数種別コード が出荷に対応するもの）と
+    # 在庫指数を分離してDataFrameに整形する。
+    # e-Stat IIPの分類コードは統計によって異なるため、コード名で判別する。
+    try:
+        records_ship = {}
+        records_inv = {}
+        for v in value_list:
+            # 時間軸: @time は "YYYYMM" 形式
+            ym = str(v.get("@time", ""))
+            val = v.get("$", "")
+            cat_name = str(v.get("@cat01", "") or v.get("@指数種別", ""))
+            if not ym or val in ("", "-", "***", "x"):
+                continue
+            try:
+                date = pd.to_datetime(ym, format="%Y%m")
+                fval = float(val)
+            except (ValueError, TypeError):
+                continue
+            # 出荷・在庫の判別（e-Stat IIPでは指数種別名に含まれる）
+            if "出荷" in cat_name:
+                records_ship[date] = fval
+            elif "在庫" in cat_name:
+                records_inv[date] = fval
+
+        if not records_ship or not records_inv:
+            return None
+
+        df_ship = pd.Series(records_ship, name="shipment_index")
+        df_inv = pd.Series(records_inv, name="inventory_index")
+        df = pd.concat([df_ship, df_inv], axis=1).dropna()
+        df.index.name = "date"
+        df = df.sort_index()
+
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(IIP_CSV_PATH)
+        return df
+
+    except Exception:
+        return None
+
+
+def load_or_fetch_iip(app_id: str | None = None) -> pd.DataFrame:
+    """IIPデータを取得する（優先度: ローカルCSV → e-Stat API → サンプルデータ）
+
+    1. data/iip_electronic_parts.csv が存在すればそれを返す。
+    2. 存在しなければ e-Stat API（ESTAT_APP_ID 環境変数 or app_id 引数）で取得。
+    3. 取得失敗時は create_sample_iip_data() のサンプルデータを返す。
+
+    Returns:
+        DataFrame (columns: shipment_index, inventory_index, index=date)
+    """
+    if IIP_CSV_PATH.exists():
+        return load_iip_from_csv(IIP_CSV_PATH)
+
+    fetched = fetch_iip_from_estat(app_id=app_id)
+    if fetched is not None:
+        return fetched
+
+    return create_sample_iip_data()
 
 
 def load_iip_from_csv(filepath: str | Path) -> pd.DataFrame:

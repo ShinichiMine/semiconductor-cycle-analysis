@@ -11,11 +11,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import dash
-from dash import dcc, html, callback, Input, Output
+from dash import dcc, html, callback, Input, Output, dash_table
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import pandas as pd
+import numpy as np
 
 from src.stock_data import (
     SEMICONDUCTOR_STOCKS,
@@ -23,14 +24,14 @@ from src.stock_data import (
     fetch_sox_index,
     normalize_prices,
 )
-from src.iip_data import create_sample_iip_data, calc_cycle_indicator
+from src.iip_data import load_or_fetch_iip, calc_cycle_indicator
 
 # ============================================================
 # データ準備
 # ============================================================
 
 print("データを準備中...")
-iip = calc_cycle_indicator(create_sample_iip_data())
+iip = calc_cycle_indicator(load_or_fetch_iip())
 
 print("株価データを取得中...")
 try:
@@ -263,12 +264,187 @@ app.layout = html.Div(
                 dcc.Tab(label="サイクル指標", value="tab-cycle"),
                 dcc.Tab(label="株価推移", value="tab-stocks"),
                 dcc.Tab(label="サイクル×株価", value="tab-overlay"),
+                dcc.Tab(label="局面別リターン", value="tab-phase-return"),
+                dcc.Tab(label="相関分析", value="tab-correlation"),
             ],
             style={"marginBottom": "15px"},
         ),
         html.Div(id="tab-content"),
     ],
 )
+
+
+def _calc_phase_returns():
+    """局面別リターン統計を計算して返す（DataFrame）"""
+    if not prices_available or prices.empty:
+        return pd.DataFrame()
+    monthly_returns = prices.pct_change() * 100  # %
+    phase_series = iip["cycle_phase"].reindex(monthly_returns.index, method="ffill")
+    combined = monthly_returns.copy()
+    combined["cycle_phase"] = phase_series
+    combined = combined.dropna(subset=["cycle_phase"])
+
+    rows = []
+    for phase in ["回復期", "好況期", "後退期", "不況期"]:
+        subset = combined[combined["cycle_phase"] == phase]
+        for stock in prices.columns:
+            vals = subset[stock].dropna()
+            if len(vals) == 0:
+                continue
+            rows.append({
+                "局面": phase,
+                "銘柄": stock,
+                "平均リターン(%)": round(vals.mean(), 2),
+                "中央値リターン(%)": round(vals.median(), 2),
+                "勝率(%)": round((vals > 0).mean() * 100, 1),
+                "サンプル数": len(vals),
+            })
+    return pd.DataFrame(rows)
+
+
+def _build_phase_return_tab():
+    """局面別リターン分析タブのレイアウト"""
+    df = _calc_phase_returns()
+    if df.empty:
+        return html.Div("株価データ未取得のため表示できません。",
+                        style={"padding": "40px", "textAlign": "center", "color": "#888"})
+
+    # 局面ごとに背景色を付けるための style_data_conditional
+    style_cond = []
+    for phase, colors in PHASE_COLORS.items():
+        style_cond.append({
+            "if": {"filter_query": f'{{局面}} = "{phase}"'},
+            "backgroundColor": colors["bg"],
+            "color": "#333",
+        })
+
+    table = dash_table.DataTable(
+        data=df.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in df.columns],
+        style_table={"overflowX": "auto"},
+        style_header={
+            "backgroundColor": "#f5f5f5",
+            "fontWeight": "bold",
+            "textAlign": "center",
+            "borderBottom": "2px solid #ddd",
+        },
+        style_cell={
+            "textAlign": "center",
+            "padding": "8px 12px",
+            "fontFamily": "'Noto Sans JP', sans-serif",
+            "fontSize": "13px",
+        },
+        style_data_conditional=style_cond,
+        sort_action="native",
+        filter_action="native",
+        page_size=40,
+    )
+
+    legend = html.Div(
+        style={"display": "flex", "gap": "15px", "justifyContent": "center",
+               "marginBottom": "12px", "flexWrap": "wrap"},
+        children=[
+            html.Span(f"■ {phase}", style={"color": c["text"], "fontSize": "13px"})
+            for phase, c in PHASE_COLORS.items()
+        ],
+    )
+
+    return html.Div([
+        html.H3("局面別リターン分析", style={"marginBottom": "8px"}),
+        html.P("各サイクル局面における銘柄ごとの月次リターン統計（IIPサンプルデータベース）",
+               style={"color": "#888", "fontSize": "12px", "marginBottom": "12px"}),
+        legend,
+        table,
+    ])
+
+
+def _build_correlation_tab():
+    """相関分析タブのレイアウト"""
+    if not prices_available or prices.empty:
+        return html.Div("株価データ未取得のため表示できません。",
+                        style={"padding": "40px", "textAlign": "center", "color": "#888"})
+
+    # 年範囲スライダーの設定
+    common_idx = iip.index.intersection(prices.pct_change().dropna().index)
+    if len(common_idx) == 0:
+        return html.Div("共通データなし", style={"padding": "40px", "textAlign": "center"})
+
+    min_year = int(common_idx.min().year)
+    max_year = int(common_idx.max().year)
+
+    return html.Div([
+        html.H3("相関分析: SI比率 × 月次リターン", style={"marginBottom": "8px"}),
+        html.P("SI比率(3ヶ月移動平均)と各銘柄月次リターンのピアソン相関係数",
+               style={"color": "#888", "fontSize": "12px", "marginBottom": "16px"}),
+        html.Div(
+            style={"display": "flex", "alignItems": "center", "gap": "20px",
+                   "marginBottom": "16px"},
+            children=[
+                html.Label("対象期間（年）:", style={"whiteSpace": "nowrap"}),
+                dcc.RangeSlider(
+                    id="corr-year-range",
+                    min=min_year,
+                    max=max_year,
+                    step=1,
+                    value=[min_year, max_year],
+                    marks={y: str(y) for y in range(min_year, max_year + 1, 2)},
+                    tooltip={"placement": "bottom", "always_visible": False},
+                ),
+            ],
+        ),
+        dcc.Graph(id="corr-heatmap"),
+    ])
+
+
+@callback(
+    Output("corr-heatmap", "figure"),
+    Input("corr-year-range", "value"),
+    prevent_initial_call=False,
+)
+def update_corr_heatmap(year_range):
+    if not prices_available or prices.empty:
+        return go.Figure()
+
+    start_year, end_year = year_range if year_range else [None, None]
+    monthly_returns = prices.pct_change() * 100
+    si = iip["si_ratio_ma3"].reindex(monthly_returns.index, method="ffill")
+
+    combined = monthly_returns.copy()
+    combined["SI比率(3MA)"] = si
+    combined = combined.dropna()
+
+    if start_year:
+        combined = combined[combined.index.year >= start_year]
+    if end_year:
+        combined = combined[combined.index.year <= end_year]
+
+    if combined.empty or len(combined) < 3:
+        fig = go.Figure()
+        fig.add_annotation(text="データ不足", xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False, font=dict(size=18))
+        return fig
+
+    # SI比率と各銘柄リターンの相関のみ（1行×N列）
+    stock_cols = [c for c in prices.columns if c in combined.columns]
+    corr_vals = [[combined["SI比率(3MA)"].corr(combined[s]) for s in stock_cols]]
+    corr_df = pd.DataFrame(corr_vals, index=["SI比率(3MA)"], columns=stock_cols)
+
+    fig = px.imshow(
+        corr_df,
+        color_continuous_scale="RdBu",
+        zmin=-1, zmax=1,
+        text_auto=".2f",
+        aspect="auto",
+        title=f"SI比率 × 月次リターン 相関係数 ({start_year}〜{end_year}年)",
+    )
+    fig.update_layout(
+        height=250,
+        template="plotly_white",
+        margin=dict(l=80, r=20, t=60, b=60),
+        coloraxis_colorbar=dict(title="相関係数"),
+    )
+    fig.update_xaxes(tickangle=-30)
+    return fig
 
 
 @callback(Output("tab-content", "children"), Input("tabs", "value"))
@@ -331,6 +507,12 @@ def render_tab(tab):
             ),
             dcc.Graph(id="overlay-chart"),
         ])
+
+    elif tab == "tab-phase-return":
+        return _build_phase_return_tab()
+
+    elif tab == "tab-correlation":
+        return _build_correlation_tab()
 
 
 @callback(
