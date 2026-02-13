@@ -42,7 +42,11 @@ def fetch_stock_prices(
                 print(f"  [WARN] {name} ({ticker}): データなし")
                 continue
             # 月次リサンプル（月末終値）
-            monthly = df["Close"].resample("ME").last()
+            # yfinance>=1.0 returns MultiIndex columns (Price, Ticker)
+            close = df["Close"]
+            if isinstance(close, pd.DataFrame):
+                close = close.squeeze()
+            monthly = close.resample("ME").last()
             frames[name] = monthly
         except Exception as e:
             print(f"  [ERROR] {name} ({ticker}): {e}")
@@ -59,7 +63,10 @@ def fetch_sox_index(start: str = "2010-01-01", end: str | None = None) -> pd.Ser
     df = yf.download("^SOX", start=start, end=end, progress=False)
     if df.empty:
         return pd.Series(dtype=float, name="SOX")
-    monthly = df["Close"].resample("ME").last()
+    close = df["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.squeeze()
+    monthly = close.resample("ME").last()
     monthly.name = "SOX"
     return monthly
 

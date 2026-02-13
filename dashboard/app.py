@@ -200,6 +200,24 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
 )
 
+
+def _status_card(title, value, color):
+    return html.Div(
+        style={
+            "flex": "1", "minWidth": "150px", "padding": "15px",
+            "borderRadius": "8px", "backgroundColor": "#fff",
+            "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+            "textAlign": "center",
+        },
+        children=[
+            html.Div(title, style={"fontSize": "12px", "color": "#888",
+                                    "marginBottom": "5px"}),
+            html.Div(value, style={"fontSize": "22px", "fontWeight": "bold",
+                                    "color": color}),
+        ],
+    )
+
+
 # 現在のサイクル情報
 latest = iip.iloc[-1]
 current_phase = latest["cycle_phase"]
@@ -251,23 +269,6 @@ app.layout = html.Div(
         html.Div(id="tab-content"),
     ],
 )
-
-
-def _status_card(title, value, color):
-    return html.Div(
-        style={
-            "flex": "1", "minWidth": "150px", "padding": "15px",
-            "borderRadius": "8px", "backgroundColor": "#fff",
-            "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
-            "textAlign": "center",
-        },
-        children=[
-            html.Div(title, style={"fontSize": "12px", "color": "#888",
-                                    "marginBottom": "5px"}),
-            html.Div(value, style={"fontSize": "22px", "fontWeight": "bold",
-                                    "color": color}),
-        ],
-    )
 
 
 @callback(Output("tab-content", "children"), Input("tabs", "value"))
