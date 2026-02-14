@@ -152,15 +152,30 @@ def fetch_iip_from_estat(app_id: str | None = None) -> pd.DataFrame | None:
 def load_or_fetch_iip(app_id: str | None = None) -> pd.DataFrame:
     """IIPデータを取得する（優先度: ローカルCSV → e-Stat API → サンプルデータ）
 
-    1. data/iip_electronic_parts.csv が存在すればそれを返す。
-    2. 存在しなければ e-Stat API（ESTAT_APP_ID 環境変数 or app_id 引数）で取得。
+    1. data/iip_electronic_parts.csv が存在する場合、最終データ日付を確認。
+       - 最終データ日付が30日以上前 AND ESTAT_APP_ID 設定済みの場合: API再取得を試みる。
+         成功 → 新CSVで上書き＋返す。失敗 → 既存CSVを返す（フォールバック）。
+       - 最終データ日付が30日以内 OR ESTAT_APP_ID未設定 → 既存CSVをそのまま返す。
+    2. CSVが存在しなければ e-Stat API（ESTAT_APP_ID 環境変数 or app_id 引数）で取得。
     3. 取得失敗時は create_sample_iip_data() のサンプルデータを返す。
 
     Returns:
         DataFrame (columns: shipment_index, inventory_index, index=date)
     """
+    app_id = app_id or os.environ.get("ESTAT_APP_ID")
+
     if IIP_CSV_PATH.exists():
-        return load_iip_from_csv(IIP_CSV_PATH)
+        cached = load_iip_from_csv(IIP_CSV_PATH)
+        last_date = cached.index.max()
+        days_old = (pd.Timestamp.now() - last_date).days
+        if days_old > 30 and app_id:
+            print(f"IIPキャッシュが{days_old}日前のデータ。API再取得を試みます...")
+            fetched = fetch_iip_from_estat(app_id=app_id)
+            if fetched is not None:
+                print(f"IIPデータ更新成功: {fetched.index.min()} 〜 {fetched.index.max()}")
+                return fetched
+            print("API取得失敗。既存キャッシュを使用します。")
+        return cached
 
     fetched = fetch_iip_from_estat(app_id=app_id)
     if fetched is not None:

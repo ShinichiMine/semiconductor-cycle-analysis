@@ -365,7 +365,10 @@ def _build_correlation_tab():
                         style={"padding": "40px", "textAlign": "center", "color": "#888"})
 
     # 年範囲スライダーの設定
-    common_idx = iip.index.intersection(prices.pct_change().dropna().index)
+    # iipインデックスは月初(2013-01-01等)、pricesは月末(2013-01-31等) → MonthEndに正規化
+    iip_me = iip.copy()
+    iip_me.index = iip_me.index + pd.offsets.MonthEnd(0)
+    common_idx = iip_me.index.intersection(prices.pct_change().dropna().index)
     if len(common_idx) == 0:
         return html.Div("共通データなし", style={"padding": "40px", "textAlign": "center"})
 
@@ -407,7 +410,10 @@ def update_corr_heatmap(year_range):
 
     start_year, end_year = year_range if year_range else [None, None]
     monthly_returns = prices.pct_change() * 100
-    si = iip["si_ratio_ma3"].reindex(monthly_returns.index, method="ffill")
+    # iipインデックスを月末に正規化してから reindex（月初/月末の不一致を解消）
+    iip_me = iip.copy()
+    iip_me.index = iip_me.index + pd.offsets.MonthEnd(0)
+    si = iip_me["si_ratio_ma3"].reindex(monthly_returns.index, method="ffill")
 
     combined = monthly_returns.copy()
     combined["SI比率(3MA)"] = si
