@@ -25,17 +25,75 @@ ESTAT_BASE_URL = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
 # IIPデータCSV保存先
 IIP_CSV_PATH = DATA_DIR / "iip_electronic_parts.csv"
 
-# e-Stat 鉱工業指数 statsDataId
-# 鉱工業指数（平成27年基準）電子部品・デバイス工業 出荷・在庫
-ESTAT_STATS_DATA_ID = "0003119453"
+# e-Stat 鉱工業生産・出荷・在庫指数 statsDataId
+# 2020年基準: 業種別季節調整済指数【月次】（2018年〜最新）
+ESTAT_SHIP_2020 = "0004015801"  # 出荷
+ESTAT_INV_2020 = "0004015802"   # 在庫
+ESTAT_CAT01_ELECTRONIC = "0046000"  # 電子部品・デバイス工業
+
+# 2015年基準: 業種別季節調整済指数【月次】（2013年〜2023年3月）
+ESTAT_SHIP_2015 = "0004017875"  # 出荷
+ESTAT_INV_2015 = "0004017876"   # 在庫
+ESTAT_CAT02_ELECTRONIC = "1046000"  # 電子部品・デバイス工業（2015年基準）
+
+
+def _fetch_estat_series(
+    app_id: str, stats_data_id: str, filter_key: str, filter_value: str,
+    time_field: str, time_class_id: str,
+) -> pd.Series:
+    """e-Stat APIから1系列を取得する共通関数"""
+    params = {
+        "appId": app_id,
+        "lang": "J",
+        "statsDataId": stats_data_id,
+        f"cd{filter_key.title()}": filter_value,
+        "metaGetFlg": "Y",
+        "cntGetFlg": "N",
+    }
+    resp = requests.get(ESTAT_BASE_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    result = data.get("GET_STATS_DATA", {}).get("RESULT", {})
+    if result.get("STATUS") != 0:
+        raise ValueError(f"e-Stat API error: {result}")
+
+    stat_data = data.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {})
+
+    # Build time code -> YYYYMM name mapping
+    time_map = {}
+    for cls in stat_data.get("CLASS_INF", {}).get("CLASS_OBJ", []):
+        if cls.get("@id") == time_class_id:
+            items = cls.get("CLASS", [])
+            if isinstance(items, dict):
+                items = [items]
+            for item in items:
+                time_map[item.get("@code", "")] = item.get("@name", "")
+
+    values = stat_data.get("DATA_INF", {}).get("VALUE", [])
+    records = {}
+    for v in values:
+        time_code = v.get(f"@{time_field}", "")
+        time_name = time_map.get(time_code, "")
+        val = v.get("$", "")
+        if val in ("", "-", "***", "x") or not time_name:
+            continue
+        if len(time_name) == 6 and time_name.isdigit():
+            try:
+                records[pd.to_datetime(time_name, format="%Y%m")] = float(val)
+            except (ValueError, TypeError):
+                continue
+    return pd.Series(records).sort_index()
 
 
 def fetch_iip_from_estat(app_id: str | None = None) -> pd.DataFrame | None:
     """e-Stat APIから電子部品・デバイス工業のIIPデータを取得し、CSVに保存する。
 
+    2015年基準（2013年〜2023年3月）と2020年基準（2018年〜最新）を結合し、
+    重複期間の比率でリベースして長期データを構築する。
+
     環境変数 ESTAT_APP_ID、または引数 app_id でアプリケーションIDを指定する。
     取得成功時は data/iip_electronic_parts.csv に保存し、DataFrameを返す。
-    取得失敗（appId未設定・API エラー・解析エラー）時は None を返す。
 
     Returns:
         DataFrame (columns: shipment_index, inventory_index, index=date) or None
@@ -44,65 +102,42 @@ def fetch_iip_from_estat(app_id: str | None = None) -> pd.DataFrame | None:
     if not app_id:
         return None
 
-    params = {
-        "appId": app_id,
-        "lang": "J",
-        "statsDataId": ESTAT_STATS_DATA_ID,
-        "cdArea": "00000",
-        "metaGetFlg": "N",
-        "cntGetFlg": "N",
-        "explanationGetFlg": "N",
-        "annotationGetFlg": "N",
-        "sectionHeaderFlg": "1",
-    }
-
     try:
-        resp = requests.get(ESTAT_BASE_URL, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return None
+        # 2020年基準（最新データ）
+        ship20 = _fetch_estat_series(
+            app_id, ESTAT_SHIP_2020, "cat01", ESTAT_CAT01_ELECTRONIC, "time", "time")
+        inv20 = _fetch_estat_series(
+            app_id, ESTAT_INV_2020, "cat01", ESTAT_CAT01_ELECTRONIC, "time", "time")
 
-    # API レスポンス検証
-    result = data.get("GET_STATS_DATA", {}).get("RESULT", {})
-    if result.get("STATUS") != 0:
-        return None
+        # 2015年基準（過去データ）
+        ship15 = _fetch_estat_series(
+            app_id, ESTAT_SHIP_2015, "cat02", ESTAT_CAT02_ELECTRONIC, "cat01", "cat01")
+        inv15 = _fetch_estat_series(
+            app_id, ESTAT_INV_2015, "cat02", ESTAT_CAT02_ELECTRONIC, "cat01", "cat01")
 
-    stat_data = data.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {})
-    value_list = stat_data.get("DATA_INF", {}).get("VALUE", [])
-    if not value_list:
-        return None
+        # 重複期間でリベース比率算出
+        overlap = ship15.index.intersection(ship20.index)
+        if len(overlap) < 6:
+            # 重複不十分なら2020年基準のみ使用
+            df = pd.DataFrame({
+                "shipment_index": ship20, "inventory_index": inv20,
+            }).dropna()
+        else:
+            ship_ratio = ship20[overlap].mean() / ship15[overlap].mean()
+            inv_ratio = inv20[overlap].mean() / inv15[overlap].mean()
 
-    # 出荷指数（$指数種別コード が出荷に対応するもの）と
-    # 在庫指数を分離してDataFrameに整形する。
-    # e-Stat IIPの分類コードは統計によって異なるため、コード名で判別する。
-    try:
-        records_ship = {}
-        records_inv = {}
-        for v in value_list:
-            # 時間軸: @time は "YYYYMM" 形式
-            ym = str(v.get("@time", ""))
-            val = v.get("$", "")
-            cat_name = str(v.get("@cat01", "") or v.get("@指数種別", ""))
-            if not ym or val in ("", "-", "***", "x"):
-                continue
-            try:
-                date = pd.to_datetime(ym, format="%Y%m")
-                fval = float(val)
-            except (ValueError, TypeError):
-                continue
-            # 出荷・在庫の判別（e-Stat IIPでは指数種別名に含まれる）
-            if "出荷" in cat_name:
-                records_ship[date] = fval
-            elif "在庫" in cat_name:
-                records_inv[date] = fval
+            ship15_rebased = ship15 * ship_ratio
+            inv15_rebased = inv15 * inv_ratio
 
-        if not records_ship or not records_inv:
-            return None
+            ship_combined = pd.concat([
+                ship15_rebased[ship15_rebased.index < ship20.index[0]], ship20])
+            inv_combined = pd.concat([
+                inv15_rebased[inv15_rebased.index < inv20.index[0]], inv20])
 
-        df_ship = pd.Series(records_ship, name="shipment_index")
-        df_inv = pd.Series(records_inv, name="inventory_index")
-        df = pd.concat([df_ship, df_inv], axis=1).dropna()
+            df = pd.DataFrame({
+                "shipment_index": ship_combined, "inventory_index": inv_combined,
+            }).dropna()
+
         df.index.name = "date"
         df = df.sort_index()
 
