@@ -519,7 +519,7 @@ def render_tab(tab):
     Output("stock-chart", "figure"),
     Input("stock-selector", "value"),
     Input("log-scale", "value"),
-    prevent_initial_call=True,
+    prevent_initial_call=False,
 )
 def update_stock_chart(selected, log_val):
     return create_stock_chart(selected, "log" in (log_val or []))
@@ -528,7 +528,7 @@ def update_stock_chart(selected, log_val):
 @callback(
     Output("overlay-chart", "figure"),
     Input("overlay-stock", "value"),
-    prevent_initial_call=True,
+    prevent_initial_call=False,
 )
 def update_overlay(stock_name):
     if stock_name:
