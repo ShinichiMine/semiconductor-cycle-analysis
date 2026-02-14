@@ -19,7 +19,7 @@ SEMICONDUCTOR_STOCKS = {
 # ベンチマーク
 BENCHMARKS = {
     "^N225": "日経平均",
-    "SOX": "フィラデルフィア半導体指数",
+    "^SOX": "フィラデルフィア半導体指数",
 }
 
 
@@ -69,6 +69,14 @@ def fetch_sox_index(start: str = "2010-01-01", end: str | None = None) -> pd.Ser
     monthly = close.resample("ME").last()
     monthly.name = "SOX"
     return monthly
+
+
+def fetch_benchmark_prices(
+    start: str = "2010-01-01",
+    end: str | None = None,
+) -> pd.DataFrame:
+    """ベンチマーク指数（日経平均・SOX）の月次終値を取得"""
+    return fetch_stock_prices(tickers=BENCHMARKS, start=start, end=end)
 
 
 def normalize_prices(df: pd.DataFrame, base_date: str | None = None) -> pd.DataFrame:

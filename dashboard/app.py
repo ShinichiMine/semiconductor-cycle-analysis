@@ -21,6 +21,7 @@ import numpy as np
 from src.stock_data import (
     SEMICONDUCTOR_STOCKS,
     fetch_stock_prices,
+    fetch_benchmark_prices,
     fetch_sox_index,
     normalize_prices,
 )
@@ -41,6 +42,15 @@ except Exception as e:
     print(f"株価取得失敗（オフラインモード）: {e}")
     prices = pd.DataFrame()
     prices_available = False
+
+print("ベンチマークデータを取得中...")
+try:
+    benchmarks = fetch_benchmark_prices(start="2010-01-01")
+    benchmarks_available = not benchmarks.empty
+except Exception as e:
+    print(f"ベンチマーク取得失敗（オフラインモード）: {e}")
+    benchmarks = pd.DataFrame()
+    benchmarks_available = False
 
 PHASE_COLORS = {
     "回復期": {"bg": "rgba(76, 175, 80, 0.15)", "text": "#4CAF50"},
@@ -155,7 +165,7 @@ def create_stock_chart(selected_stocks=None, use_log=True):
     return fig
 
 
-def create_overlay_chart(stock_name):
+def create_overlay_chart(stock_name, use_log=False):
     """SI比率と個別銘柄の2軸チャート"""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
@@ -186,8 +196,189 @@ def create_overlay_chart(stock_name):
         hovermode="x unified",
         margin=dict(l=60, r=60, t=20, b=40),
     )
-    fig.update_yaxes(title_text="株価 (円)", secondary_y=False)
+    fig.update_yaxes(
+        title_text="株価 (円)",
+        type="log" if use_log else "linear",
+        secondary_y=False,
+    )
     fig.update_yaxes(title_text="SI比率", secondary_y=True)
+    return fig
+
+
+def create_inventory_cycle_chart():
+    """在庫循環図（散布図 + 4象限）"""
+    df = iip.dropna(subset=["shipment_yoy", "inventory_yoy"]).copy()
+    if df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="データ不足", xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False, font=dict(size=20))
+        return fig
+
+    # カラーグラデーション（古い→新しい: 薄→濃）
+    n = len(df)
+    colors = [f"rgba(33, 150, 243, {0.2 + 0.8 * i / max(n - 1, 1)})" for i in range(n)]
+
+    fig = go.Figure()
+
+    # 線で時系列接続
+    fig.add_trace(
+        go.Scatter(
+            x=df["shipment_yoy"], y=df["inventory_yoy"],
+            mode="lines",
+            line=dict(color="rgba(150,150,150,0.4)", width=1),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+
+    # 散布点
+    fig.add_trace(
+        go.Scatter(
+            x=df["shipment_yoy"], y=df["inventory_yoy"],
+            mode="markers",
+            marker=dict(size=6, color=list(range(n)), colorscale="Blues",
+                        showscale=True, colorbar=dict(title="時系列順")),
+            text=[d.strftime("%Y-%m") for d in df.index],
+            hovertemplate="出荷YoY: %{x:.1f}%<br>在庫YoY: %{y:.1f}%<br>%{text}<extra></extra>",
+            name="月次データ",
+        )
+    )
+
+    # 最新点を星マーカーで強調
+    latest_row = df.iloc[-1]
+    fig.add_trace(
+        go.Scatter(
+            x=[latest_row["shipment_yoy"]], y=[latest_row["inventory_yoy"]],
+            mode="markers+text",
+            marker=dict(size=16, color="#F44336", symbol="star"),
+            text=[df.index[-1].strftime("%Y-%m")],
+            textposition="top right",
+            name="最新月",
+        )
+    )
+
+    # 4象限の背景色 + ラベル
+    x_range = max(abs(df["shipment_yoy"].min()), abs(df["shipment_yoy"].max())) * 1.2
+    y_range = max(abs(df["inventory_yoy"].min()), abs(df["inventory_yoy"].max())) * 1.2
+
+    quadrants = [
+        {"x0": 0, "x1": x_range, "y0": -y_range, "y1": 0,
+         "color": PHASE_COLORS["回復期"]["bg"], "label": "回復期", "lx": x_range * 0.5, "ly": -y_range * 0.5},
+        {"x0": 0, "x1": x_range, "y0": 0, "y1": y_range,
+         "color": PHASE_COLORS["好況期"]["bg"], "label": "好況期", "lx": x_range * 0.5, "ly": y_range * 0.5},
+        {"x0": -x_range, "x1": 0, "y0": 0, "y1": y_range,
+         "color": PHASE_COLORS["後退期"]["bg"], "label": "後退期", "lx": -x_range * 0.5, "ly": y_range * 0.5},
+        {"x0": -x_range, "x1": 0, "y0": -y_range, "y1": 0,
+         "color": PHASE_COLORS["不況期"]["bg"], "label": "不況期", "lx": -x_range * 0.5, "ly": -y_range * 0.5},
+    ]
+
+    for q in quadrants:
+        fig.add_shape(
+            type="rect", x0=q["x0"], x1=q["x1"], y0=q["y0"], y1=q["y1"],
+            fillcolor=q["color"], layer="below", line_width=0,
+        )
+        fig.add_annotation(
+            x=q["lx"], y=q["ly"], text=q["label"],
+            showarrow=False, font=dict(size=14, color="rgba(0,0,0,0.3)"),
+        )
+
+    # 原点の十字線
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1)
+    fig.add_vline(x=0, line_dash="dash", line_color="gray", line_width=1)
+
+    fig.update_layout(
+        height=550,
+        template="plotly_white",
+        xaxis_title="出荷指数 前年比 (%)",
+        yaxis_title="在庫指数 前年比 (%)",
+        xaxis=dict(range=[-x_range, x_range]),
+        yaxis=dict(range=[-y_range, y_range]),
+        hovermode="closest",
+        margin=dict(l=60, r=20, t=40, b=60),
+    )
+    return fig
+
+
+def create_phase_return_bar_chart():
+    """局面別リターンのグループ棒グラフ"""
+    df = _calc_phase_returns()
+    if df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="株価データ未取得", xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False, font=dict(size=20))
+        return fig
+
+    phase_order = ["回復期", "好況期", "後退期", "不況期"]
+    fig = go.Figure()
+    for phase in phase_order:
+        subset = df[df["局面"] == phase]
+        fig.add_trace(
+            go.Bar(
+                x=subset["銘柄"],
+                y=subset["平均リターン(%)"],
+                name=phase,
+                marker_color=PHASE_COLORS[phase]["text"],
+                opacity=0.85,
+            )
+        )
+
+    fig.update_layout(
+        barmode="group",
+        height=400,
+        template="plotly_white",
+        yaxis_title="平均月次リターン (%)",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=60, r=20, t=40, b=80),
+    )
+    fig.update_xaxes(tickangle=-30)
+    return fig
+
+
+def create_global_index_chart():
+    """グローバル指数比較チャート（SOX/日経/IIP YoY）"""
+    fig = go.Figure()
+
+    # IIP出荷指数 YoY
+    iip_me = iip.copy()
+    iip_me.index = iip_me.index + pd.offsets.MonthEnd(0)
+    shipment_yoy = iip_me["shipment_yoy"].dropna()
+    fig.add_trace(
+        go.Scatter(
+            x=shipment_yoy.index, y=shipment_yoy,
+            name="IIP出荷指数 YoY",
+            line=dict(color="#673AB7", width=2),
+        )
+    )
+
+    # ベンチマーク YoY
+    if benchmarks_available and not benchmarks.empty:
+        bench_yoy = benchmarks.pct_change(12) * 100  # 12ヶ月前比
+        bench_yoy = bench_yoy.dropna(how="all")
+        colors = {"日経平均": "#2196F3", "フィラデルフィア半導体指数": "#FF5722"}
+        labels = {"日経平均": "日経平均 YoY", "フィラデルフィア半導体指数": "SOX指数 YoY"}
+        for col in bench_yoy.columns:
+            series = bench_yoy[col].dropna()
+            if series.empty:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=series.index, y=series,
+                    name=labels.get(col, f"{col} YoY"),
+                    line=dict(color=colors.get(col, "#888"), width=2),
+                )
+            )
+
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1)
+
+    fig.update_layout(
+        height=500,
+        template="plotly_white",
+        yaxis_title="前年比 (%)",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=60, r=20, t=40, b=40),
+    )
     return fig
 
 
@@ -262,9 +453,11 @@ app.layout = html.Div(
             value="tab-cycle",
             children=[
                 dcc.Tab(label="サイクル指標", value="tab-cycle"),
+                dcc.Tab(label="在庫循環図", value="tab-inventory-cycle"),
                 dcc.Tab(label="株価推移", value="tab-stocks"),
                 dcc.Tab(label="サイクル×株価", value="tab-overlay"),
                 dcc.Tab(label="局面別リターン", value="tab-phase-return"),
+                dcc.Tab(label="グローバル指数", value="tab-global-index"),
                 dcc.Tab(label="相関分析", value="tab-correlation"),
             ],
             style={"marginBottom": "15px"},
@@ -353,6 +546,8 @@ def _build_phase_return_tab():
         html.H3("局面別リターン分析", style={"marginBottom": "8px"}),
         html.P("各サイクル局面における銘柄ごとの月次リターン統計（IIPサンプルデータベース）",
                style={"color": "#888", "fontSize": "12px", "marginBottom": "12px"}),
+        dcc.Graph(figure=create_phase_return_bar_chart()),
+        html.Hr(style={"margin": "20px 0"}),
         legend,
         table,
     ])
@@ -468,6 +663,14 @@ def render_tab(tab):
             ),
         ])
 
+    elif tab == "tab-inventory-cycle":
+        return html.Div([
+            html.H3("在庫循環図", style={"marginBottom": "8px"}),
+            html.P("出荷指数YoY × 在庫指数YoY の散布図（反時計回りサイクル）",
+                   style={"color": "#888", "fontSize": "12px", "marginBottom": "12px"}),
+            dcc.Graph(figure=create_inventory_cycle_chart()),
+        ])
+
     elif tab == "tab-stocks":
         stock_options = [{"label": name, "value": name}
                          for name in (prices.columns if prices_available else [])]
@@ -500,7 +703,8 @@ def render_tab(tab):
         default = stock_options[0]["value"] if stock_options else None
         return html.Div([
             html.Div(
-                style={"marginBottom": "10px"},
+                style={"display": "flex", "gap": "15px", "alignItems": "center",
+                       "marginBottom": "10px"},
                 children=[
                     html.Label("銘柄:"),
                     dcc.Dropdown(
@@ -509,6 +713,11 @@ def render_tab(tab):
                         value=default,
                         style={"width": "300px"},
                     ),
+                    dcc.Checklist(
+                        id="overlay-log-scale",
+                        options=[{"label": "対数スケール", "value": "log"}],
+                        value=[],
+                    ),
                 ],
             ),
             dcc.Graph(id="overlay-chart"),
@@ -516,6 +725,14 @@ def render_tab(tab):
 
     elif tab == "tab-phase-return":
         return _build_phase_return_tab()
+
+    elif tab == "tab-global-index":
+        return html.Div([
+            html.H3("グローバル指数比較", style={"marginBottom": "8px"}),
+            html.P("SOX指数・日経平均・IIP出荷指数の前年比推移",
+                   style={"color": "#888", "fontSize": "12px", "marginBottom": "12px"}),
+            dcc.Graph(figure=create_global_index_chart()),
+        ])
 
     elif tab == "tab-correlation":
         return _build_correlation_tab()
@@ -534,11 +751,12 @@ def update_stock_chart(selected, log_val):
 @callback(
     Output("overlay-chart", "figure"),
     Input("overlay-stock", "value"),
+    Input("overlay-log-scale", "value"),
     prevent_initial_call=False,
 )
-def update_overlay(stock_name):
+def update_overlay(stock_name, log_val):
     if stock_name:
-        return create_overlay_chart(stock_name)
+        return create_overlay_chart(stock_name, "log" in (log_val or []))
     return go.Figure()
 
 
