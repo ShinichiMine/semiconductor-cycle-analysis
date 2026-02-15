@@ -14,6 +14,10 @@ SEMICONDUCTOR_STOCKS = {
     "6146.T": "ディスコ",
     "6963.T": "ローム",
     "4063.T": "信越化学工業",
+    "3436.T": "SUMCO",
+    "6526.T": "ソシオネクスト",
+    "6315.T": "TOWA",
+    "6728.T": "アルバック",
 }
 
 # ベンチマーク
@@ -77,6 +81,41 @@ def fetch_benchmark_prices(
 ) -> pd.DataFrame:
     """ベンチマーク指数（日経平均・SOX）の月次終値を取得"""
     return fetch_stock_prices(tickers=BENCHMARKS, start=start, end=end)
+
+
+# マクロ指標（yfinance取得分）
+MACRO_YFINANCE = {
+    "^TNX": "米10年国債利回り",
+    "JPY=X": "ドル円為替",
+}
+
+
+def fetch_macro_yfinance(
+    start: str = "2010-01-01",
+    end: str | None = None,
+) -> pd.DataFrame:
+    """マクロ指標（金利・為替）をyfinanceから月次で取得"""
+    if end is None:
+        end = datetime.now().strftime("%Y-%m-%d")
+
+    frames = {}
+    for ticker, name in MACRO_YFINANCE.items():
+        try:
+            df = yf.download(ticker, start=start, end=end, progress=False)
+            if df.empty:
+                print(f"  [WARN] {name} ({ticker}): データなし")
+                continue
+            close = df["Close"]
+            if isinstance(close, pd.DataFrame):
+                close = close.squeeze()
+            monthly = close.resample("ME").last()
+            frames[name] = monthly
+        except Exception as e:
+            print(f"  [ERROR] {name} ({ticker}): {e}")
+
+    result = pd.DataFrame(frames)
+    result.index.name = "date"
+    return result
 
 
 def normalize_prices(df: pd.DataFrame, base_date: str | None = None) -> pd.DataFrame:
